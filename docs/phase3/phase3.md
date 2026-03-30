@@ -137,9 +137,10 @@ The airline dimension stores descriptive information about carriers.
 - `iata_code`
 - `airline_code`
 - `airline_name`
+- `country_of_origin`
 
 #### Analytical Use
-This dimension allows users to compare operational efficiency, delays, and cancellations across carriers.
+This dimension allows users to compare operational efficiency, delays, and cancellations across carriers, including analysis by the airline’s country of origin.
 
 ---
 
@@ -153,7 +154,6 @@ The airport dimension stores descriptive and geographic information about airpor
 - `iata_code`
 - `airport_name`
 - `city`
-- `state`
 - `country`
 - `latitude`
 - `longitude`
@@ -166,12 +166,9 @@ This single logical dimension is used in two roles:
 #### Hierarchy
 A typical geographic hierarchy may be interpreted as:
 
-> **Country → State → City → Airport**
+> **Country → City → Airport**
 
 This supports geographic analysis of departure and arrival patterns.
-
----
-
 ### 4. Dim_Plane
 
 The plane dimension stores descriptive information about aircraft.

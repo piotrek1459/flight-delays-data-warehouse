@@ -1,123 +1,304 @@
-# Phase 2 – Operational Database Model
+# Phase 3 – Logical Data Warehouse Model
 
 ## Overview
 
-This section presents the **operational database model** designed for the flight delays and cancellations project.  
-The model describes the logical structure of the source database that stores operational flight data before transforming it into a data warehouse schema.
+This section presents the **logical data warehouse model** for the flight delays and cancellations analysis domain.  
+The model is derived from the operational database designed in Phase 2 and reorganized according to dimensional modeling principles, so that it supports analytical queries, reporting, and multidimensional analysis.
 
-The central entity in the model is the **Flights** table, which stores information about individual flights, including scheduling data, actual execution times, delays, cancellations, diversions, and detailed delay categories.  
-Supporting entities describe airlines, airports, aircraft, and cancellation reasons.
+According to the laboratory requirements, the logical model should contain:
+- **fact table(s)** with defined measures,
+- **dimension tables** with descriptive attributes and hierarchies,
+- **relationships** between facts and dimensions, typically in a **1:N** pattern,
+- an overall structure organized as a **star schema** or **snowflake schema**. :contentReference[oaicite:0]{index=0}
 
-The purpose of this model is to organize raw operational data in a structured and relational way, so that it can later serve as the foundation for ETL processes and analytical warehouse design.
-
----
-
-## Diagram
-
-![Operational Database Model](./images/phase2-operational-model.png)
-
-> Replace the path above with the actual exported image from PlantUML.
+For this project, the warehouse is modeled mainly as a **star schema**, with one central fact table describing flight operations and several surrounding dimensions.
 
 ---
 
-## Main Entities
+## Modeling Assumptions
 
-### 1. Flights
-The `Flights` table is the core of the operational model.  
-It contains data about each flight, such as:
+### Business Process
+The analyzed business process is **flight execution** in the context of delays, cancellations, and operational disruptions.
 
-- flight date
-- flight number
-- departure and arrival airports
-- assigned airline
-- assigned aircraft
-- scheduled and actual departure/arrival times
-- departure and arrival delays
-- cancellation and diversion status
-- detailed causes of delay:
-  - carrier delay
-  - weather delay
-  - NAS delay
-  - security delay
-  - late aircraft delay
+### Grain of the Fact Table
+The grain of the central fact table is:
 
-This table connects all other entities and represents the main business process being analyzed.
+> **one row per one flight on a specific flight date**
 
-### 2. Airlines
-The `Airlines` table stores information about carriers operating the flights.  
-It includes airline identifiers, airline codes, and airline names.
+This means that each record in the fact table represents a single realized or cancelled flight instance identified by flight number and date.
 
-Each airline can operate many flights, while each flight is assigned to exactly one airline.
-
-### 3. Airports
-The `Airports` table stores information about airports, including:
-
-- IATA code
-- airport name
-- city
-- state
-- country
-- geographic coordinates
-
-This entity is used twice in relation to flights:
-- as the **origin airport**
-- as the **destination airport**
-
-One airport can therefore be associated with many flights as either departure or arrival location.
-
-### 4. Planes
-The `Planes` table stores aircraft-related information, such as:
-
-- tail number
-- aircraft model
-- manufacturer
-- issue date
-- operational status
-
-Each plane may be assigned to multiple flights over time, while each flight references one aircraft.
-
-### 5. Cancellation Reasons
-The `Cancellation_Reasons` table is a lookup table that describes cancellation reason codes.  
-It standardizes the meaning of cancellation categories and improves data consistency.
-
-A cancellation reason can be linked to many flights, but each cancelled flight has at most one cancellation code.
+This level of granularity allows the warehouse to support:
+- daily and monthly delay analysis,
+- airline performance comparisons,
+- airport-origin and airport-destination reporting,
+- aircraft-based operational analysis,
+- cancellation pattern analysis.
 
 ---
 
-## Relationships Between Entities
+## Schema Type
 
-The operational model includes the following relationships:
+The model is designed as a **star schema** with limited snowflake semantics in the business interpretation of hierarchies.  
+The fact table is placed in the center, while all dimensions describe the context of each flight event.
 
-- **Airlines → Flights**  
-  One airline operates many flights.
+Central fact:
+- `Fact_Flight_Operations`
 
-- **Airports → Flights (origin)**  
-  One airport can be the origin of many flights.
+Dimensions:
+- `Dim_Date`
+- `Dim_Airline`
+- `Dim_Airport`
+- `Dim_Plane`
+- `Dim_Cancellation_Reason`
 
-- **Airports → Flights (destination)**  
-  One airport can be the destination of many flights.
+The `Dim_Airport` dimension plays two roles in the model:
+- **Origin Airport**
+- **Destination Airport**
 
-- **Planes → Flights**  
-  One aircraft can be assigned to many flights over time.
-
-- **Cancellation Reasons → Flights**  
-  One cancellation reason can describe many cancelled flights.
-
-These relationships ensure referential integrity and reduce redundancy in the operational database.
+This is a standard **role-playing dimension** pattern in dimensional modeling.
 
 ---
 
-## Design Rationale
+## Fact Table
 
-This model was designed as an **operational relational database**, not yet as a dimensional warehouse model.  
-Its structure reflects the real-world business domain of air transportation and supports efficient storage of transactional flight data.
+### Fact_Flight_Operations
 
-The model separates descriptive data into dedicated tables and keeps flight event data in the central `Flights` table.  
-This approach improves consistency, readability, and maintainability, while also preparing the dataset for future transformation into a star schema.
+The fact table stores measurable operational indicators related to flights.
+
+#### Measures
+The following measures are included:
+
+- `departure_delay_min`
+- `arrival_delay_min`
+- `carrier_delay_min`
+- `weather_delay_min`
+- `nas_delay_min`
+- `security_delay_min`
+- `late_aircraft_delay_min`
+- `flight_count`
+
+#### Descriptive / Indicator Attributes in Fact
+In addition to numeric measures, the fact table contains analysis-supporting indicators:
+
+- `flight_number` *(degenerate dimension)*
+- `cancelled_flag`
+- `diverted_flag`
+
+#### Foreign Key References
+The fact table references the following dimensions:
+
+- `date_key`
+- `airline_key`
+- `origin_airport_key`
+- `destination_airport_key`
+- `plane_key`
+- `cancel_reason_key`
+
+The fact table does **not** store detailed descriptive attributes of airlines, airports, aircraft, or cancellation reasons.  
+Those attributes are separated into dimensions to reduce redundancy and support analytical slicing.
+
+---
+
+## Dimensions
+
+### 1. Dim_Date
+
+The date dimension describes the temporal context of each flight.
+
+#### Attributes
+- `date_key`
+- `full_date`
+- `year`
+- `month`
+- `month_name`
+- `quarter`
+- `day_of_month`
+- `day_of_week`
+- `day_name`
+- `is_weekend`
+- `season`
+
+#### Hierarchy
+A typical hierarchy in this dimension is:
+
+> **Year → Quarter → Month → Day**
+
+This dimension enables trend analysis over time and period-based aggregations.
+
+---
+
+### 2. Dim_Airline
+
+The airline dimension stores descriptive information about carriers.
+
+#### Attributes
+- `airline_key`
+- `airline_id`
+- `iata_code`
+- `airline_code`
+- `airline_name`
+
+#### Analytical Use
+This dimension allows users to compare operational efficiency, delays, and cancellations across carriers.
+
+---
+
+### 3. Dim_Airport
+
+The airport dimension stores descriptive and geographic information about airports.
+
+#### Attributes
+- `airport_key`
+- `airport_id`
+- `iata_code`
+- `airport_name`
+- `city`
+- `state`
+- `country`
+- `latitude`
+- `longitude`
+
+#### Roles in the Schema
+This single logical dimension is used in two roles:
+- `origin_airport_key`
+- `destination_airport_key`
+
+#### Hierarchy
+A typical geographic hierarchy may be interpreted as:
+
+> **Country → State → City → Airport**
+
+This supports geographic analysis of departure and arrival patterns.
+
+---
+
+### 4. Dim_Plane
+
+The plane dimension stores descriptive information about aircraft.
+
+#### Attributes
+- `plane_key`
+- `plane_id`
+- `tail_number`
+- `model`
+- `manufacturer`
+- `issue_date`
+- `status`
+
+#### Analytical Use
+This dimension enables analysis of delays and operational disruptions by aircraft model, manufacturer, or aircraft status.
+
+---
+
+### 5. Dim_Cancellation_Reason
+
+This dimension stores standardized cancellation categories.
+
+#### Attributes
+- `cancel_reason_key`
+- `cancellation_code`
+- `description`
+
+#### Analytical Use
+This dimension is used only when flights are cancelled, but it remains part of the schema to enable consistent reporting on cancellation causes.
+
+---
+
+## Measures and Aggregation Behavior
+
+The fact table contains mostly **additive measures**, especially all delay durations expressed in minutes.  
+These measures can be aggregated across time, airline, airport, and aircraft dimensions.
+
+Examples:
+- total departure delay by airline,
+- average arrival delay by month,
+- total weather delay by airport,
+- total number of cancelled flights by cancellation reason.
+
+`flight_count` is typically modeled as a constant value equal to `1` for each row, enabling:
+- total number of flights,
+- counting delayed or cancelled flights using filtering conditions.
+
+Boolean indicators such as `cancelled_flag` and `diverted_flag` are not classical measures, but they support conditional aggregation in BI tools.
+
+---
+
+## Mapping from Operational Model to Warehouse Model
+
+The warehouse model is derived from the operational entities from Phase 2.  
+The transformation logic is as follows:
+
+- `Flights` → source for `Fact_Flight_Operations`
+- `Airlines` → source for `Dim_Airline`
+- `Airports` → source for `Dim_Airport`
+- `Planes` → source for `Dim_Plane`
+- `Cancellation_Reasons` → source for `Dim_Cancellation_Reason`
+- calendar fields from `Flights.flight_date` → source for `Dim_Date`
+
+In the operational model, all flight-related data was concentrated around the `Flights` table.  
+In the warehouse model, this structure is reorganized into:
+- one **central fact**
+- multiple **descriptive dimensions**
+
+This improves query readability and analytical usability.
+
+The previous file content described the operational relational model centered on the `Flights` table and its supporting entities, so it corresponded to Phase 2 rather than Phase 3. :contentReference[oaicite:1]{index=1}
+
+---
+
+## Relationships in the Logical Model
+
+The logical warehouse model contains the following relationships:
+
+- `Dim_Date 1:N Fact_Flight_Operations`
+- `Dim_Airline 1:N Fact_Flight_Operations`
+- `Dim_Airport 1:N Fact_Flight_Operations` as **Origin Airport**
+- `Dim_Airport 1:N Fact_Flight_Operations` as **Destination Airport**
+- `Dim_Plane 1:N Fact_Flight_Operations`
+- `Dim_Cancellation_Reason 1:N Fact_Flight_Operations`
+
+All relationships are dimension-to-fact relationships typical for dimensional modeling.
+
+---
+
+## Technical Design Decisions
+
+### Surrogate Keys
+Each dimension uses a surrogate primary key:
+- `date_key`
+- `airline_key`
+- `airport_key`
+- `plane_key`
+- `cancel_reason_key`
+
+This improves integration, stability, and historical tracking in a real warehouse implementation.
+
+### Degenerate Dimension
+`flight_number` remains in the fact table as a **degenerate dimension**, because it is a business identifier useful in reporting but does not require a separate dimension table.
+
+### Null / Optional Context
+Some flights may not have a cancellation reason or even a known aircraft entry.  
+In a physical implementation, such situations should be handled using:
+- nullable foreign keys, or
+- default “Unknown / Not Applicable” dimension members.
+
+### Slowly Changing Dimensions
+If implemented physically, some dimensions may require **Slowly Changing Dimension (SCD)** handling:
+- `Dim_Airline` – usually Type 1
+- `Dim_Airport` – usually Type 1
+- `Dim_Plane` – potentially Type 2 if aircraft status changes should be historized
+
+At the logical stage, these behaviors are only noted as future implementation considerations.
 
 ---
 
 ## Conclusion
 
-The operational database model provides a clean and normalized structure for storing flight delay and cancellation data.  
-It captures the most important business entities and their relationships, and it serves as the starting point for the next phase of the project, where the analytical data warehouse model will be developed.
+The logical data warehouse model reorganizes operational flight data into a dimensional structure suitable for analytics.  
+The schema is centered around the `Fact_Flight_Operations` fact table and supported by dimensions describing time, airline, airport, aircraft, and cancellation reason.
+
+This model satisfies the laboratory requirement for a logical warehouse model by defining:
+- a central fact with measures,
+- descriptive dimensions with attributes and hierarchies,
+- explicit 1:N relationships between dimensions and fact,
+- a clear star-schema analytical structure. :contentReference[oaicite:2]{index=2}

@@ -138,7 +138,7 @@ def parse_hhmm(value) -> Optional[str]:
     Returns None for missing values.
     Edge case: '2400' is treated as '00:00:00' (midnight).
     """
-    if value is None or value != value:  # NaN / None check
+    if value is None or pd.isna(value):
         return None
     s = str(value).strip().split(".")[0]  # strip float decimals
     if not s or s in ("", "nan", "NA"):
@@ -153,8 +153,8 @@ def parse_hhmm(value) -> Optional[str]:
 
 
 def _to_int_or_none(value) -> Optional[int]:
-    """Convert float/string to int, returning None for NaN."""
-    if value is None or value != value:
+    """Convert float/string to int, returning None for NaN/NA."""
+    if value is None or pd.isna(value):
         return None
     try:
         return int(float(value))
@@ -232,6 +232,11 @@ def normalize_dataset1_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
 # Fact transformation
 # ---------------------------------------------------------------------------
 
+def _int_col(series: pd.Series) -> pd.Series:
+    """Convert a pandas Series to nullable Int64, coercing errors to pd.NA."""
+    return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+
 def transform_fact_chunk(
     chunk: pd.DataFrame,
     lookups: dict,
@@ -253,113 +258,111 @@ def transform_fact_chunk(
      taxi_out_min, taxi_in_min, air_time_min, distance_miles,
      flight_count, cancelled_flag, diverted_flag)
     """
-    airline_lookup   = lookups["airline"]
-    airport_lookup   = lookups["airport"]
-    plane_lookup     = lookups["plane"]
-    cancel_lookup    = lookups["cancel_reason"]
+    df = chunk.copy()
 
-    rows = []
-    skipped = 0
-
-    for _, row in chunk.iterrows():
-        # --- Build flight date -----------------------------------------------
-        if is_dataset3:
+    # --- Build date_key -------------------------------------------------------
+    if is_dataset3:
+        y = _int_col(df["YEAR"])
+        m = _int_col(df["MONTH"])
+        d = _int_col(df["DAY"])
+        df["date_key"] = y * 10000 + m * 100 + d
+    else:
+        def _parse_date(s):
             try:
-                y = int(row["YEAR"])
-                m = int(row["MONTH"])
-                d = int(row["DAY"])
-                date_key = y * 10000 + m * 100 + d
-            except (ValueError, TypeError):
-                skipped += 1
-                continue
-        else:
-            try:
-                parts = str(row.get("flight_date_str", "")).split("-")
-                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                date_key = y * 10000 + m * 100 + d
-            except (ValueError, TypeError, IndexError):
-                skipped += 1
-                continue
+                parts = str(s).split("-")
+                return int(parts[0]) * 10000 + int(parts[1]) * 100 + int(parts[2])
+            except Exception:
+                return pd.NA
+        df["date_key"] = df["flight_date_str"].apply(_parse_date).astype("Int64")
 
-        if date_key not in lookups["date"]:
-            skipped += 1
-            continue
+    valid_dates = set(lookups["date"])
+    df = df[df["date_key"].notna() & df["date_key"].isin(valid_dates)]
 
-        # --- Airline ---------------------------------------------------------
-        airline_iata = str(row.get("airline_iata", "")).strip()
-        airline_key = airline_lookup.get(airline_iata)
-        if airline_key is None:
-            skipped += 1
-            continue
+    # --- Airline lookup -------------------------------------------------------
+    df["airline_iata"] = df["airline_iata"].astype(str).str.strip()
+    df["airline_key"] = df["airline_iata"].map(lookups["airline"])
+    df = df[df["airline_key"].notna()]
 
-        # --- Airports --------------------------------------------------------
-        origin_iata = str(row.get("origin_iata", "")).strip()
-        dest_iata   = str(row.get("dest_iata", "")).strip()
+    # --- Airport lookups (role-playing) ---------------------------------------
+    df["origin_iata"] = df["origin_iata"].astype(str).str.strip()
+    df["dest_iata"]   = df["dest_iata"].astype(str).str.strip()
+    df["origin_key"]  = df["origin_iata"].map(lookups["airport"])
+    df["dest_key"]    = df["dest_iata"].map(lookups["airport"])
+    df = df[df["origin_key"].notna() & df["dest_key"].notna()]
 
-        origin_key = airport_lookup.get(origin_iata)
-        dest_key   = airport_lookup.get(dest_iata)
+    if df.empty:
+        return [], len(chunk) - len(df)
 
-        if origin_key is None or dest_key is None:
-            skipped += 1
-            continue
+    skipped = len(chunk) - len(df)
 
-        # --- Plane -----------------------------------------------------------
-        tail = str(row.get("tail_number", "")).strip()
-        if not tail or tail in ("nan", "None", ""):
-            plane_key = plane_lookup.get("UNKNOWN")
-        else:
-            plane_key = plane_lookup.get(tail, plane_lookup.get("UNKNOWN"))
+    # --- Plane lookup ---------------------------------------------------------
+    tail_col = df["tail_number"].astype(str).str.strip()
+    tail_col = tail_col.where(~tail_col.isin(["nan", "None", ""]), "UNKNOWN")
+    unknown_key = lookups["plane"].get("UNKNOWN")
+    df["plane_key"] = tail_col.map(lookups["plane"]).fillna(unknown_key)
 
-        # --- Cancellation reason ---------------------------------------------
-        cancelled = int(float(row.get("cancelled", 0) or 0))
-        cancel_code = str(row.get("cancel_code", "")).strip()
-        if cancelled and cancel_code in cancel_lookup:
-            cancel_reason_key = cancel_lookup[cancel_code]
-        else:
-            cancel_reason_key = cancel_lookup.get("N")
+    # --- Cancellation reason --------------------------------------------------
+    cancelled = _int_col(df["cancelled"]).fillna(0)
+    cancel_code = df["cancel_code"].astype(str).str.strip()
+    n_key = lookups["cancel_reason"].get("N")
+    def _cancel_key(row_cancelled, code):
+        if row_cancelled and code in lookups["cancel_reason"]:
+            return lookups["cancel_reason"][code]
+        return n_key
+    df["cancel_reason_key"] = [
+        _cancel_key(c, code)
+        for c, code in zip(cancelled, cancel_code)
+    ]
 
-        # --- Flight number ---------------------------------------------------
-        fn = _to_int_or_none(row.get("flight_number"))
-        flight_number = str(fn) if fn is not None else "0"
+    # --- Flight number --------------------------------------------------------
+    df["flight_number_str"] = _int_col(df["flight_number"]).fillna(0).astype(str)
 
-        # --- Delays ----------------------------------------------------------
-        dep_delay   = _to_int_or_none(row.get("dep_delay"))
-        arr_delay   = _to_int_or_none(row.get("arr_delay"))
-        carrier_d   = _to_int_or_none(row.get("carrier_delay")) or 0
-        weather_d   = _to_int_or_none(row.get("weather_delay")) or 0
-        nas_d       = _to_int_or_none(row.get("nas_delay")) or 0
-        security_d  = _to_int_or_none(row.get("security_delay")) or 0
-        late_d      = _to_int_or_none(row.get("late_aircraft_delay")) or 0
-        taxi_out    = _to_int_or_none(row.get("taxi_out"))
-        taxi_in     = _to_int_or_none(row.get("taxi_in"))
-        air_time    = _to_int_or_none(row.get("air_time"))
-        distance    = _to_int_or_none(row.get("distance"))
+    # --- Delay columns --------------------------------------------------------
+    dep_delay  = _int_col(df["dep_delay"])
+    arr_delay  = _int_col(df["arr_delay"])
+    carrier_d  = _int_col(df["carrier_delay"]).fillna(0)
+    weather_d  = _int_col(df["weather_delay"]).fillna(0)
+    nas_d      = _int_col(df["nas_delay"]).fillna(0)
+    security_d = _int_col(df["security_delay"]).fillna(0)
+    late_d     = _int_col(df["late_aircraft_delay"]).fillna(0)
+    taxi_out   = _int_col(df["taxi_out"])
+    taxi_in    = _int_col(df["taxi_in"])
+    air_time   = _int_col(df["air_time"])
+    distance   = _int_col(df["distance"])
+    diverted   = _int_col(df["diverted"]).fillna(0)
 
-        diverted = int(float(row.get("diverted", 0) or 0))
+    def _py(val):
+        """Convert pandas NA / numpy int to Python int or None."""
+        if pd.isna(val):
+            return None
+        return int(val)
 
-        rows.append((
-            date_key,
-            airline_key,
-            origin_key,
-            dest_key,
-            plane_key,
-            cancel_reason_key,
-            flight_number,
+    rows = [
+        (
+            int(row.date_key),
+            int(row.airline_key),
+            int(row.origin_key),
+            int(row.dest_key),
+            _py(row.plane_key),
+            _py(row.cancel_reason_key),
+            row.flight_number_str,
             source_label,
-            dep_delay,
-            arr_delay,
-            carrier_d,
-            weather_d,
-            nas_d,
-            security_d,
-            late_d,
-            taxi_out,
-            taxi_in,
-            air_time,
-            distance,
-            1,               # flight_count
-            bool(cancelled),
-            bool(diverted),
-        ))
+            _py(dep),
+            _py(arr),
+            int(car), int(wea), int(nas), int(sec), int(lat),
+            _py(tout), _py(tin), _py(air), _py(dist),
+            1,
+            bool(can),
+            bool(div),
+        )
+        for row, dep, arr, car, wea, nas, sec, lat, tout, tin, air, dist, can, div in zip(
+            df.itertuples(index=False),
+            dep_delay, arr_delay,
+            carrier_d, weather_d, nas_d, security_d, late_d,
+            taxi_out, taxi_in, air_time, distance,
+            cancelled, diverted,
+        )
+    ]
 
     return rows, skipped
+

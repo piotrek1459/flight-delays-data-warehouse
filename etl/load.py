@@ -121,7 +121,7 @@ _FACT_COPY_SQL = """COPY Fact_Flight_Operations (
     security_delay_min, late_aircraft_delay_min,
     taxi_out_min, taxi_in_min, air_time_min, distance_miles,
     flight_count, cancelled_flag, diverted_flag
-) FROM STDIN WITH (FORMAT TEXT, NULL '\\N', DELIMITER '\\t')"""
+) FROM STDIN WITH (FORMAT TEXT, NULL '\\N')"""
 
 
 def _row_to_tsv(row: tuple) -> str:

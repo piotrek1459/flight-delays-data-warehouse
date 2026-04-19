@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: flight_dw_postgres
+    environment:
+      POSTGRES_DB: flight_dw
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/ddl.sql:/docker-entrypoint-initdb.d/01_ddl.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flight_dw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

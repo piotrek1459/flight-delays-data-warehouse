@@ -299,3 +299,99 @@ This model satisfies the laboratory requirement for a logical warehouse model by
 - descriptive dimensions with attributes and hierarchies,
 - explicit 1:N relationships between dimensions and fact,
 - a clear star-schema analytical structure. :contentReference[oaicite:2]{index=2}
+
+---
+
+## Schema Diagram (dbdiagram.io)
+
+The following DBML definition precisely describes the **logical data warehouse model** (star schema) for the flight delays analysis domain.  
+The fact table is placed at the center; all dimension tables surround it with 1:N relationships.
+
+> To render this diagram interactively, paste the DBML code at **https://dbdiagram.io/d**
+
+```dbml
+Table Dim_Date {
+  date_key      INT          [pk, note: "YYYYMMDD integer surrogate key, e.g. 20150115"]
+  full_date     DATE         [not null, unique]
+  year          SMALLINT     [not null]
+  month         SMALLINT     [not null, note: "1–12"]
+  month_name    VARCHAR(10)  [not null]
+  quarter       SMALLINT     [not null, note: "1–4"]
+  day_of_month  SMALLINT     [not null]
+  day_of_week   SMALLINT     [not null, note: "1=Monday, 7=Sunday"]
+  day_name      VARCHAR(10)  [not null]
+  is_weekend    BOOLEAN      [not null]
+  season        VARCHAR(10)  [not null, note: "Winter / Spring / Summer / Autumn"]
+}
+
+Table Dim_Airline {
+  airline_key       INT          [pk, increment]
+  airline_id        INT          [note: "Business key from operational DB"]
+  iata_code         CHAR(2)      [not null, unique]
+  airline_code      CHAR(2)
+  airline_name      VARCHAR(50)  [not null]
+  country_of_origin VARCHAR(50)
+}
+
+Table Dim_Airport {
+  airport_key   INT           [pk, increment]
+  airport_id    INT           [note: "Business key from operational DB"]
+  iata_code     CHAR(3)       [not null, unique]
+  airport_name  VARCHAR(100)
+  city          VARCHAR(50)
+  country       VARCHAR(50)
+  latitude      DECIMAL(9,5)
+  longitude     DECIMAL(9,5)
+}
+
+Table Dim_Plane {
+  plane_key     INT          [pk, increment]
+  plane_id      INT
+  tail_number   VARCHAR(10)  [not null, unique]
+  model         VARCHAR(50)
+  manufacturer  VARCHAR(50)
+  issue_date    DATE
+  status        VARCHAR(20)
+}
+
+Table Dim_Cancellation_Reason {
+  cancel_reason_key  INT         [pk, increment]
+  cancellation_code  CHAR(1)     [not null, unique]
+  description        VARCHAR(50) [not null]
+}
+
+Table Fact_Flight_Operations {
+  flight_operation_id      BIGINT      [pk, increment]
+  date_key                 INT         [ref: > Dim_Date.date_key, not null]
+  airline_key              INT         [ref: > Dim_Airline.airline_key, not null]
+  origin_airport_key       INT         [ref: > Dim_Airport.airport_key, not null]
+  destination_airport_key  INT         [ref: > Dim_Airport.airport_key, not null]
+  plane_key                INT         [ref: > Dim_Plane.plane_key]
+  cancel_reason_key        INT         [ref: > Dim_Cancellation_Reason.cancel_reason_key]
+  flight_number            VARCHAR(6)  [note: "Degenerate dimension — no separate table needed"]
+  source_dataset           VARCHAR(20) [note: "Identifies data origin: 'dataset1' or 'dataset3'"]
+  departure_delay_min      SMALLINT
+  arrival_delay_min        SMALLINT
+  carrier_delay_min        SMALLINT
+  weather_delay_min        SMALLINT
+  nas_delay_min            SMALLINT
+  security_delay_min       SMALLINT
+  late_aircraft_delay_min  SMALLINT
+  taxi_out_min             SMALLINT
+  taxi_in_min              SMALLINT
+  air_time_min             SMALLINT
+  distance_miles           SMALLINT
+  flight_count             SMALLINT    [not null, default: 1]
+  cancelled_flag           BOOLEAN     [not null, default: false]
+  diverted_flag            BOOLEAN     [not null, default: false]
+}
+```
+
+### Role-Playing Dimension Note
+
+`Dim_Airport` participates in the fact table **twice**:
+- `origin_airport_key` — departure airport
+- `destination_airport_key` — arrival airport
+
+This is a standard **role-playing dimension** pattern in dimensional modeling.  
+The same physical dimension table provides two logical views of the same airport data.

@@ -1,0 +1,731 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{caption}
+\usepackage{titlesec}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue
+}
+
+\lstdefinestyle{python}{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray},
+    stringstyle=\color{orange!70!black},
+    numberstyle=\tiny\color{gray},
+    numbers=left,
+    stepnumber=1,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!5},
+    showstringspaces=false,
+    tabsize=4,
+}
+
+\lstdefinestyle{sql}{
+    language=SQL,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray},
+    stringstyle=\color{orange!70!black},
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!5},
+    showstringspaces=false,
+    morekeywords={COPY,STDIN,BIGSERIAL,SMALLINT,SERIAL,BOOLEAN,DECIMAL,VARCHAR,CHAR,REFERENCES,CASCADE,ON,CONFLICT,DO,NOTHING},
+}
+
+\title{\textbf{Laboratory 5 Report}\\[0.5em]
+\large ETL Process for the Flight Delays Data Warehouse}
+\date{June 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\section{Analysis of Data Sources}
+% ===========================================================================
+
+Three datasets were considered for this project. Before beginning the ETL
+design, each was analysed for quality issues, structural incompatibilities,
+and missing data.
+
+% ---------------------------------------------------------------------------
+\subsection{Dataset 3 — Primary Flight Data (2015)}
+% ---------------------------------------------------------------------------
+
+Dataset~3 is the primary source and consists of three CSV files located in
+\texttt{data/dataset3/}:
+
+\begin{itemize}
+    \item \textbf{\texttt{flights.csv}} — approximately 5.8~million rows of US
+          domestic flight records for the year 2015, with 31 columns covering
+          scheduling, delays, cancellations, and operational metrics.
+    \item \textbf{\texttt{airlines.csv}} — 14~rows mapping IATA carrier codes
+          to full airline names.
+    \item \textbf{\texttt{airports.csv}} — 322~rows with IATA airport codes,
+          names, cities, states, and geographic coordinates.
+\end{itemize}
+
+The following quality issues were identified and resolved:
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{4.5cm}
+                  >{\raggedright\arraybackslash}p{3.5cm}
+                  >{\raggedright\arraybackslash}p{2cm}
+                  >{\raggedright\arraybackslash}p{4.5cm}}
+\toprule
+\textbf{Issue} & \textbf{Column(s)} & \textbf{Rows affected} & \textbf{Resolution} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Issue} & \textbf{Column(s)} & \textbf{Rows affected} & \textbf{Resolution} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+
+Missing departure and arrival delays &
+\texttt{DEPARTURE\_DELAY}, \texttt{ARRIVAL\_DELAY} &
+{\raise0pt\hbox{$\sim$}}86\,153 &
+Expected for cancelled flights; stored as \texttt{NULL} \\[4pt]
+
+Missing tail number &
+\texttt{TAIL\_NUMBER} &
+{\raise0pt\hbox{$\sim$}}14\,721 &
+Mapped to \texttt{UNKNOWN} sentinel row in \texttt{Dim\_Plane} \\[4pt]
+
+All delay breakdown columns empty &
+\texttt{AIR\_SYSTEM\_DELAY} through \texttt{WEATHER\_DELAY} &
+{\raise0pt\hbox{$\sim$}}4\,755\,640 &
+Stored as \texttt{0} — absence of delay is not a defect \\[4pt]
+
+Cancellation code absent on non-cancelled flights &
+\texttt{CANCELLATION\_REASON} &
+{\raise0pt\hbox{$\sim$}}5\,729\,195 &
+Mapped to sentinel code \texttt{N} (Not Applicable) in \texttt{Dim\_Cancellation\_Reason} \\[4pt]
+
+Times stored as HHMM integer strings &
+\texttt{SCHEDULED\_DEPARTURE}, \texttt{DEPARTURE\_TIME}, \texttt{ARRIVAL\_TIME}, \texttt{SCHEDULED\_ARRIVAL} &
+All rows &
+Converted to \texttt{HH:MM:00} format; edge case \texttt{2400} mapped to \texttt{00:00:00} \\[4pt]
+
+Date split across three separate columns &
+\texttt{YEAR}, \texttt{MONTH}, \texttt{DAY} &
+All rows &
+Reconstructed into a single \texttt{DATE} value and integer \texttt{date\_key} \\[4pt]
+
+No aircraft metadata &
+\texttt{TAIL\_NUMBER} only &
+All rows &
+\texttt{Dim\_Plane} stores tail numbers only; \texttt{model}, \texttt{manufacturer}, and \texttt{issue\_date} remain \texttt{NULL} \\
+
+\end{longtable}
+
+A specific technical issue was encountered with HHMM time columns: because
+values such as \texttt{0005} or \texttt{0930} could be parsed by pandas as
+integers, leading zeroes would be silently dropped. This was prevented by
+reading all time columns with explicit \texttt{dtype=str} in the extraction
+layer.
+
+% ---------------------------------------------------------------------------
+\subsection{Dataset 1 — Supplementary Flight Data (2019–2023)}
+% ---------------------------------------------------------------------------
+
+Dataset~1 (\texttt{data/dataset1/flights\_sample\_3m.csv}) contains
+approximately 3~million rows covering the years 2019 through~2023. Although
+it records the same domain (US domestic flights), its schema differs from
+Dataset~3, requiring normalisation before it can be fed into the same
+transformation pipeline.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{4.5cm}
+                  >{\raggedright\arraybackslash}p{3.5cm}
+                  >{\raggedright\arraybackslash}p{2cm}
+                  >{\raggedright\arraybackslash}p{4.5cm}}
+\toprule
+\textbf{Issue} & \textbf{Column(s)} & \textbf{Rows affected} & \textbf{Resolution} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Issue} & \textbf{Column(s)} & \textbf{Rows affected} & \textbf{Resolution} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+
+Different column naming conventions &
+All columns &
+All rows &
+Renamed to unified internal names in \texttt{normalize\_dataset1\_chunk()} \\[4pt]
+
+No \texttt{TAIL\_NUMBER} column &
+— &
+All rows &
+\texttt{plane\_key} set to the \texttt{UNKNOWN} sentinel for all Dataset~1 rows \\[4pt]
+
+Airlines not in \texttt{airlines.csv} &
+\texttt{AIRLINE\_CODE} &
+Varies &
+Pre-scan of Dataset~1 inserts any missing carriers into \texttt{Dim\_Airline} before fact loading \\[4pt]
+
+Flight date as \texttt{YYYY-MM-DD} string &
+\texttt{FL\_DATE} &
+All rows &
+Parsed directly; no HHMM conversion required \\[4pt]
+
+Delay breakdown columns differently named &
+e.g.\ \texttt{DELAY\_DUE\_CARRIER} vs \texttt{AIRLINE\_DELAY} &
+All rows &
+Unified by column rename during normalisation \\
+
+\end{longtable}
+
+% ---------------------------------------------------------------------------
+\subsection{Dataset 2 — Excluded}
+% ---------------------------------------------------------------------------
+
+Dataset~2 (\texttt{data/dataset2/airline.csv.shuffle}, 11~GB) was evaluated
+and excluded from the ETL for the following reasons:
+
+\begin{enumerate}
+    \item \textbf{File size.} 11~GB exceeds practical processing limits for a
+    local academic environment without a distributed computing framework.
+    \item \textbf{Encoding.} The file uses latin-1 (non-UTF-8) encoding, which
+    creates normalisation complexity and risks mojibake in string columns.
+    \item \textbf{Missing reference data.} No airport or airline lookup tables
+    accompany the file, making it impossible to enrich records with the
+    geographic or carrier metadata required by the dimensional model.
+    \item \textbf{No data dictionary.} Some column semantics are ambiguous
+    without formal documentation.
+    \item \textbf{Sufficient coverage from other sources.} Datasets~1 and~3
+    together cover approximately 8.8~million flight records spanning 2015
+    and 2019–2023, which provides adequate volume and temporal range for all
+    planned analyses.
+\end{enumerate}
+
+The only artefact retained from Dataset~2 is
+\texttt{data/dataset2/carriers.csv} (1\,492 airline codes), which is
+preserved as a potential future supplement for extending \texttt{Dim\_Airline}.
+
+% ===========================================================================
+\section{ETL Approach}
+% ===========================================================================
+
+\subsection{Chosen Approach}
+
+A \textbf{self-developed Python ETL} (Approach~2 from the laboratory
+specification) was selected. The pipeline is implemented as four modules:
+
+\begin{itemize}
+    \item \texttt{etl/extract.py} — reads raw data from CSV files.
+    \item \texttt{etl/transform.py} — builds dimension DataFrames and
+          transforms raw flight records into fact rows.
+    \item \texttt{etl/load.py} — writes transformed data to PostgreSQL.
+    \item \texttt{etl/etl.py} — the orchestrator that invokes the above
+          in the correct order and manages database connections.
+\end{itemize}
+
+\subsection{Rationale}
+
+\begin{itemize}
+    \item Full control over transformation logic, NULL handling, and
+          memory-efficient chunk iteration.
+    \item The \texttt{pandas} + \texttt{psycopg2} combination is well-suited
+          to the CSV-to-PostgreSQL stack used in this project.
+    \item No additional licensed software or services are required.
+    \item The code is straightforward to inspect, debug, and extend.
+\end{itemize}
+
+An ELT approach (Approach~3) was considered but rejected: it would require
+loading approximately 12~GB of raw CSV data into PostgreSQL before any
+transformations, which is less efficient than the chunked in-memory Python
+approach. A dedicated ETL tool (Approach~1, e.g.\ SSIS) was rejected because
+it would introduce a heavyweight dependency for a relatively straightforward
+pipeline.
+
+\subsection{Technology Stack}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Component} & \textbf{Tool} & \textbf{Version} \\
+\midrule
+Extraction     & \texttt{pandas.read\_csv} with chunk iteration & pandas $\geq$ 2.0 \\
+Transformation & Python, pandas in-memory DataFrames            & Python 3.9+ \\
+Loading        & \texttt{psycopg2} \texttt{execute\_values} + \texttt{COPY FROM STDIN} & psycopg2-binary $\geq$ 2.9 \\
+Database       & PostgreSQL 14 running in a Docker container    & PostgreSQL 14 \\
+Orchestration  & \texttt{etl/etl.py}                            & — \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Pipeline Overview}
+
+The \texttt{run\_etl()} function in \texttt{etl.py} executes the following
+eight steps in order:
+
+\begin{enumerate}
+    \item Create (or recreate) the schema from \texttt{sql/ddl.sql}.
+    \item Build and load \texttt{Dim\_Date} (programmatically generated).
+    \item Extract, transform, and load \texttt{Dim\_Airline}.
+    \item Extract, transform, and load \texttt{Dim\_Airport}.
+    \item Scan \texttt{flights.csv} for unique tail numbers; build and load
+          \texttt{Dim\_Plane}.
+    \item Query all dimension surrogate keys into in-memory lookup
+          dictionaries.
+    \item Stream Dataset~3 flight records in 100\,000-row chunks through the
+          transformation pipeline and bulk-load into the fact table.
+    \item Pre-scan Dataset~1 for missing airlines; stream flight records
+          through the same pipeline and load into the fact table.
+\end{enumerate}
+
+% ===========================================================================
+\section{Data Staging Area}
+% ===========================================================================
+
+No separate staging area database was used. The raw CSV files on disk serve
+directly as the source layer. The ETL reads data in memory-efficient chunks
+of 100\,000 rows without first materialising the full dataset in any
+intermediate database.
+
+This decision is justified because:
+
+\begin{itemize}
+    \item The datasets are \emph{static snapshots}, not live feeds — there is
+          no ongoing requirement to merge incremental loads.
+    \item The transformation logic is simple enough to be applied entirely
+          in-memory during chunk iteration.
+    \item Loading ~12~GB into a staging database first would double the total
+          disk I/O for no analytical benefit.
+\end{itemize}
+
+If the pipeline were extended to support incremental loads from live sources,
+introducing a staging schema (e.g.\ raw tables mirroring the CSV structure)
+would become appropriate.
+
+% ===========================================================================
+\section{Transformations}
+% ===========================================================================
+
+This section describes every transformation applied prior to loading data into
+the data warehouse, based on the issues identified in Section~1.
+
+% ---------------------------------------------------------------------------
+\subsection{Dim\_Date — Programmatic Generation}
+% ---------------------------------------------------------------------------
+
+\texttt{Dim\_Date} is \emph{not} derived from any source file. It is
+generated entirely in Python by the \texttt{build\_dim\_date()} function in
+\texttt{transform.py}. For each year in the set
+$\{2015, 2019, 2020, 2021, 2022, 2023\}$, every calendar day is enumerated
+and the following attributes are computed:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Attribute} & \textbf{Derivation} \\
+\midrule
+\texttt{date\_key}    & $\text{YEAR} \times 10000 + \text{MONTH} \times 100 + \text{DAY}$ \\
+\texttt{full\_date}   & Python \texttt{date} object \\
+\texttt{year}         & \texttt{date.year} \\
+\texttt{month}        & \texttt{date.month} \\
+\texttt{month\_name}  & Static lookup (e.g.\ $1 \to$ \texttt{'January'}) \\
+\texttt{quarter}      & $(\text{month} - 1) \div 3 + 1$ \\
+\texttt{day\_of\_month} & \texttt{date.day} \\
+\texttt{day\_of\_week}  & \texttt{date.isoweekday()} — 1 = Monday, 7 = Sunday \\
+\texttt{day\_name}    & Static lookup (e.g.\ $3 \to$ \texttt{'Wednesday'}) \\
+\texttt{is\_weekend}  & \texttt{day\_of\_week} $\geq 6$ \\
+\texttt{season}       & Month-to-season map: Dec/Jan/Feb = Winter, Mar–May = Spring,\\
+                      & Jun–Aug = Summer, Sep–Nov = Autumn \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This produces 2\,192 rows covering all days across the six years.
+
+% ---------------------------------------------------------------------------
+\subsection{Dim\_Airline}
+% ---------------------------------------------------------------------------
+
+\textbf{Source:} \texttt{data/dataset3/airlines.csv} (14 rows), supplemented
+by carrier codes discovered in Dataset~1 during Step~8 of the pipeline.
+
+\textbf{Transformations applied} (in \texttt{transform\_dim\_airline()}):
+
+\begin{itemize}
+    \item Strip leading/trailing whitespace from \texttt{IATA\_CODE} and
+          \texttt{AIRLINE}.
+    \item Rename columns to the internal schema names
+          (\texttt{iata\_code}, \texttt{airline\_name}).
+    \item Set \texttt{country\_of\_origin = 'USA'} for all rows (all carriers
+          in the dataset are US domestic operators).
+    \item Deduplicate by \texttt{iata\_code} to prevent duplicate inserts.
+\end{itemize}
+
+\textbf{Dataset~1 supplement:} Before loading Dataset~1 fact rows, the
+\texttt{\_ensure\_dataset1\_airlines()} function scans the
+\texttt{AIRLINE\_CODE} column in chunks and inserts any IATA codes not yet
+present in \texttt{Dim\_Airline}, using the \texttt{AIRLINE} full-name column
+as the carrier name. Airline names longer than 50 characters are truncated to
+fit the \texttt{VARCHAR(50)} column constraint.
+
+% ---------------------------------------------------------------------------
+\subsection{Dim\_Airport}
+% ---------------------------------------------------------------------------
+
+\textbf{Source:} \texttt{data/dataset3/airports.csv} (322 rows).
+
+\textbf{Transformations applied} (in \texttt{transform\_dim\_airport()}):
+
+\begin{itemize}
+    \item Strip whitespace from all string columns
+          (\texttt{IATA\_CODE}, \texttt{AIRPORT}, \texttt{CITY},
+          \texttt{COUNTRY}).
+    \item Truncate \texttt{airport\_name} to 100 characters (the longest
+          observed name is 78 characters, so no data is lost in practice).
+    \item Convert \texttt{LATITUDE} and \texttt{LONGITUDE} to
+          \texttt{DECIMAL(9,5)} using \texttt{pd.to\_numeric(errors='coerce')};
+          any non-numeric value is coerced to \texttt{NULL}.
+    \item Deduplicate by \texttt{iata\_code}.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Dim\_Plane}
+% ---------------------------------------------------------------------------
+
+\textbf{Source:} The \texttt{TAIL\_NUMBER} column scanned from
+\texttt{data/dataset3/flights.csv} in a single pass of 100\,000-row chunks.
+
+\textbf{Transformations applied} (in \texttt{build\_dim\_plane()}):
+
+\begin{itemize}
+    \item Extract all unique, non-null, non-empty tail number strings
+          ($\approx$4\,800 distinct values).
+    \item Prepend a special \texttt{UNKNOWN} sentinel row as the first entry.
+          This row acts as a foreign-key target for all fact rows that lack a
+          tail number.
+    \item All metadata columns (\texttt{model}, \texttt{manufacturer},
+          \texttt{issue\_date}) are set to \texttt{NULL} because the source
+          dataset provides no aircraft metadata beyond the tail number itself.
+    \item \texttt{status} is set to the string \texttt{'Unknown'} for all rows.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Dim\_Cancellation\_Reason}
+% ---------------------------------------------------------------------------
+
+This dimension is seeded \emph{directly in the DDL} with five static values
+and requires no ETL step:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Code} & \textbf{Description} \\
+\midrule
+\texttt{A} & Carrier \\
+\texttt{B} & Weather \\
+\texttt{C} & National Air System \\
+\texttt{D} & Security \\
+\texttt{N} & Not Applicable (sentinel for non-cancelled flights) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------------------------------------------------------------------
+\subsection{Column Normalisation (Unified Schema)}
+% ---------------------------------------------------------------------------
+
+Because Datasets~1 and~3 use different column names for the same concepts,
+each chunk is first passed through a normalisation function before entering
+the shared fact transformation logic.
+
+\texttt{normalize\_dataset3\_chunk()} (in \texttt{transform.py}) renames the
+Dataset~3 columns:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Source column} & \textbf{Internal name} \\
+\midrule
+\texttt{AIRLINE}             & \texttt{airline\_iata} \\
+\texttt{ORIGIN\_AIRPORT}     & \texttt{origin\_iata} \\
+\texttt{DESTINATION\_AIRPORT}& \texttt{dest\_iata} \\
+\texttt{DEPARTURE\_DELAY}    & \texttt{dep\_delay} \\
+\texttt{ARRIVAL\_DELAY}      & \texttt{arr\_delay} \\
+\texttt{AIR\_SYSTEM\_DELAY}  & \texttt{nas\_delay} \\
+\texttt{AIRLINE\_DELAY}      & \texttt{carrier\_delay} \\
+\texttt{CANCELLATION\_REASON}& \texttt{cancel\_code} \\
+\ldots & \ldots \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{normalize\_dataset1\_chunk()} applies an analogous renaming for
+Dataset~1 (e.g.\ \texttt{AIRLINE\_CODE} $\to$ \texttt{airline\_iata},
+\texttt{DELAY\_DUE\_CARRIER} $\to$ \texttt{carrier\_delay}) and additionally
+sets \texttt{tail\_number = None} for all rows (Dataset~1 has no tail number
+column) and copies \texttt{FL\_DATE} into an auxiliary
+\texttt{flight\_date\_str} column for date parsing.
+
+% ---------------------------------------------------------------------------
+\subsection{Fact Table Transformations (Per-Chunk)}
+% ---------------------------------------------------------------------------
+
+Each 100\,000-row chunk passes through \texttt{transform\_fact\_chunk()} in
+\texttt{transform.py}. The steps are as follows:
+
+\subsubsection*{1. Date Key Construction}
+
+For Dataset~3, the integer date key is derived directly from the source
+columns:
+\[
+  \texttt{date\_key} = \texttt{YEAR} \times 10000 + \texttt{MONTH} \times 100 + \texttt{DAY}
+\]
+
+For Dataset~1, the date string \texttt{FL\_DATE} (\texttt{YYYY-MM-DD}) is
+split on the hyphen separator and the same formula is applied. Rows whose
+date key does not correspond to a date already loaded in \texttt{Dim\_Date}
+are silently dropped.
+
+\subsubsection*{2. Dimension Key Resolution}
+
+Surrogate keys for all four foreign-key dimensions are resolved using
+in-memory Python dictionaries (loaded in Step~6 of the pipeline). IATA codes
+are stripped of whitespace before lookup:
+
+\begin{itemize}
+    \item \textbf{Airline key:} \texttt{airline\_iata} $\to$ \texttt{airline\_key}. Rows
+          with unresolved airline codes are dropped.
+    \item \textbf{Airport keys:} \texttt{origin\_iata} and \texttt{dest\_iata}
+          $\to$ \texttt{origin\_airport\_key} and
+          \texttt{destination\_airport\_key}. Rows where either airport
+          cannot be resolved are counted as skipped and excluded from the
+          output.
+    \item \textbf{Plane key:} \texttt{tail\_number} $\to$ \texttt{plane\_key}.
+          Any tail number not in the lookup (including explicit \texttt{None},
+          empty string, or the string \texttt{'nan'}) is mapped to the
+          \texttt{UNKNOWN} sentinel key.
+    \item \textbf{Cancellation reason key:} resolved from the single-character
+          \texttt{cancel\_code}. For non-cancelled flights (code absent or not
+          in the lookup), the \texttt{N} sentinel key is used.
+\end{itemize}
+
+\subsubsection*{3. HHMM Time Parsing}
+
+The helper function \texttt{parse\_hhmm()} converts any HHMM representation
+(integer, float, or string) to the format \texttt{HH:MM:00} expected by
+PostgreSQL's \texttt{TIME} type:
+
+\begin{itemize}
+    \item Float decimals are stripped (e.g.\ \texttt{930.0} $\to$ \texttt{'0930'}).
+    \item The string is zero-padded to four characters
+          (\texttt{'930'} $\to$ \texttt{'0930'}).
+    \item The edge case \texttt{'2400'} (midnight expressed as end-of-day) is
+          mapped to \texttt{'00:00:00'}.
+    \item Values with out-of-range hour ($>23$) or minute ($>59$) are
+          returned as \texttt{None}.
+    \item Missing or \texttt{NaN} values return \texttt{None}.
+\end{itemize}
+
+\subsubsection*{4. NULL and Zero Handling for Delay Columns}
+
+\begin{itemize}
+    \item Cancelled flights: \texttt{dep\_delay} and \texttt{arr\_delay} are
+          stored as \texttt{NULL} (flight never departed or arrived).
+    \item Non-delayed, non-cancelled flights: all five delay breakdown columns
+          (\texttt{carrier\_delay}, \texttt{weather\_delay},
+          \texttt{nas\_delay}, \texttt{security\_delay},
+          \texttt{late\_aircraft\_delay}) are stored as \texttt{0}.
+    \item Delayed flights: breakdown columns retain their original values.
+\end{itemize}
+
+\subsubsection*{5. Type Casting}
+
+All delay, time, and distance columns are cast from pandas
+\texttt{Float32}/\texttt{Float64} to Python \texttt{int} (or \texttt{None}
+for \texttt{NaN}) via the \texttt{\_to\_int\_or\_none()} helper. This is
+required because PostgreSQL's \texttt{SMALLINT} columns do not accept
+floating-point values.
+
+\subsubsection*{6. Source Label}
+
+A \texttt{source\_dataset} string (\texttt{'dataset3'} or
+\texttt{'dataset1'}) is added to every row. This column is not present in
+either source file; it is injected by the orchestrator to allow downstream
+queries to filter or aggregate by data vintage.
+
+% ===========================================================================
+\section{Loading Phase}
+% ===========================================================================
+
+\subsection{Schema Creation}
+
+At the start of every ETL run, \texttt{create\_schema()} reads
+\texttt{sql/ddl.sql} and executes it against the target database. All tables
+are dropped in reverse foreign-key order (\texttt{CASCADE}) and recreated,
+ensuring a clean state. This makes the full ETL run idempotent and
+reproducible.
+
+\subsection{Dimension Loading}
+
+All dimension tables are loaded using
+\texttt{psycopg2.extras.execute\_values()}, which batches multiple row tuples
+into a single parameterised \texttt{INSERT} statement per call, reducing
+network round-trips compared to per-row execution.
+
+Every dimension insert uses the clause \texttt{ON CONFLICT DO NOTHING},
+meaning:
+
+\begin{itemize}
+    \item The ETL can be safely re-run without duplicating dimension data.
+    \item Partial runs (e.g.\ interrupted after dimension loading) do not
+          cause constraint violations on retry.
+\end{itemize}
+
+Loading order respects the absence of cross-dimension foreign-key
+dependencies:
+
+\begin{enumerate}
+    \item \texttt{Dim\_Date} — 2\,192 rows (programmatically generated)
+    \item \texttt{Dim\_Airline} — 14+ rows (from \texttt{airlines.csv} plus Dataset~1 supplements)
+    \item \texttt{Dim\_Airport} — 322 rows (from \texttt{airports.csv})
+    \item \texttt{Dim\_Plane} — $\approx$4\,800 rows (scanned from \texttt{flights.csv})
+    \item \texttt{Dim\_Cancellation\_Reason} — 5 rows (pre-seeded by DDL; no ETL step)
+\end{enumerate}
+
+\subsection{Lookup Dictionary Build}
+
+After all dimension tables are populated, \texttt{build\_dimension\_lookup\_dicts()} issues five \texttt{SELECT} queries and constructs
+in-memory Python dictionaries mapping each business key (IATA code, tail
+number, cancellation code, date key) to its surrogate key. These dictionaries
+are used throughout fact loading for O(1) key resolution without issuing a
+database query per row.
+
+\subsection{Fact Table Loading — COPY FROM STDIN}
+
+The fact table is loaded using PostgreSQL's native
+\texttt{COPY FROM STDIN} protocol, accessed through
+\texttt{psycopg2}'s \texttt{cursor.copy\_expert()} method. The process
+per chunk is:
+
+\begin{enumerate}
+    \item A transformed list of tuples is serialised to a tab-separated
+          in-memory \texttt{io.StringIO} buffer by the \texttt{\_row\_to\_tsv()}
+          helper. Python \texttt{None} values are emitted as \texttt{{\textbackslash}N}
+          (the PostgreSQL text-format null marker). Boolean values are written
+          as \texttt{t} or \texttt{f}.
+    \item The buffer is rewound and passed to \texttt{copy\_expert()} with the
+          following \texttt{COPY} statement:
+\begin{lstlisting}[style=sql]
+COPY Fact_Flight_Operations (
+    date_key, airline_key, origin_airport_key, destination_airport_key,
+    plane_key, cancel_reason_key, flight_number, source_dataset,
+    departure_delay_min, arrival_delay_min,
+    carrier_delay_min, weather_delay_min, nas_delay_min,
+    security_delay_min, late_aircraft_delay_min,
+    taxi_out_min, taxi_in_min, air_time_min, distance_miles,
+    flight_count, cancelled_flag, diverted_flag
+) FROM STDIN WITH (FORMAT TEXT, NULL '\N')
+\end{lstlisting}
+    \item A \texttt{COMMIT} is issued after each chunk, so progress is
+          preserved even if the process is interrupted mid-run.
+\end{enumerate}
+
+The performance advantage of \texttt{COPY} over batched \texttt{INSERT} is
+substantial:
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+\textbf{Loading method} & \textbf{Estimated time for $\sim$5.8M rows} \\
+\midrule
+\texttt{execute\_values} (batched INSERT) & 2–4 hours \\
+\texttt{COPY FROM STDIN}                  & 10–20 minutes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Split and Join Operations Required by the Warehouse Schema}
+
+The source data schemas differ significantly from the star schema in the data
+warehouse. The following split/join operations were performed during loading:
+
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{4.5cm}
+                >{\raggedright\arraybackslash}p{9.5cm}}
+\toprule
+\textbf{Operation} & \textbf{Description} \\
+\midrule
+Role-playing airport dimension &
+A single \texttt{Dim\_Airport} table is referenced twice from the fact table
+— once as \texttt{origin\_airport\_key} and once as
+\texttt{destination\_airport\_key}. Both keys are resolved from the same
+in-memory dictionary using the origin and destination IATA codes
+respectively. \\[6pt]
+
+Date reconstruction from split columns &
+Dataset~3 stores the date across three separate columns
+(\texttt{YEAR}, \texttt{MONTH}, \texttt{DAY}).
+These are combined into a single integer \texttt{date\_key} during
+transformation. \\[6pt]
+
+Airline surrogate key join &
+Source files contain only the IATA carrier code string. The integer
+\texttt{airline\_key} surrogate is resolved via the in-memory dictionary. \\[6pt]
+
+Plane surrogate key join &
+Tail number strings are mapped to integer \texttt{plane\_key} values. Rows
+with missing or unrecognised tail numbers are mapped to the \texttt{UNKNOWN}
+sentinel key. \\[6pt]
+
+Cancellation reason join &
+The raw single-character cancellation code is mapped to the integer
+\texttt{cancel\_reason\_key}; non-cancelled rows receive the \texttt{N}
+sentinel. \\[6pt]
+
+Source dataset label injection &
+The \texttt{source\_dataset} column (\texttt{'dataset3'} or
+\texttt{'dataset1'}) does not exist in any source file and is injected by the
+ETL orchestrator, enabling downstream queries to filter by data vintage or
+combine both sources with explicit awareness of the difference. \\
+
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Final Row Counts}
+
+After a complete ETL run, the warehouse contains approximately:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Table} & \textbf{Rows} & \textbf{Source} \\
+\midrule
+\texttt{Dim\_Date}                & 2\,192       & Programmatically generated \\
+\texttt{Dim\_Airline}             & 14+          & \texttt{airlines.csv} + Dataset~1 supplement \\
+\texttt{Dim\_Airport}             & 322          & \texttt{airports.csv} \\
+\texttt{Dim\_Plane}               & $\sim$4\,800 & Scanned from \texttt{flights.csv} \\
+\texttt{Dim\_Cancellation\_Reason}& 5            & DDL seed \\
+\texttt{Fact\_Flight\_Operations} & $\sim$8\,800\,000 & Dataset~3 ($\sim$5.8M) + Dataset~1 ($\sim$3M) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}
